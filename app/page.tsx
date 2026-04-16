@@ -201,8 +201,10 @@ export default function Home() {
     try {
       let finalFiles = activeTab === "file" ? files : [];
       let finalText = activeTab === "text" ? inputText : "";
+      let instagramGraphMediaUrls: string[] = [];
+      let instagramGraphMediaTypes: string[] = [];
 
-      // Instagram URL 解析
+      // Instagram URL 解析（メディアは Graph の URL のみを /api/check に渡し、サーバーで取得。Vercel のペイロード制限を避ける）
       if (activeTab === "url" && url.trim()) {
         const infoRes = await fetch("/api/instagram-info", {
           method: "POST",
@@ -219,55 +221,62 @@ export default function Home() {
         finalText = info.caption || "";
 
         if (info.media_items && info.media_items.length > 0) {
-          const processedFiles: FileData[] = [];
-          for (const item of info.media_items) {
-            // Instagram URL から Blob を取得
-            const mediaRes = await fetch(item.media_url);
-            const blob = await mediaRes.blob();
-            const file = new File([blob], "instagram_media", { type: blob.type });
-            const base64 = await fileToBase64(file);
-
-            const fileData: FileData = {
-              data: base64,
-              type: blob.type,
-              name: "instagram_media"
-            };
-
-            if (blob.type.startsWith("video/")) {
-              const { frames, duration } = await extractVideoFrames(file);
-              fileData.duration = duration;
-              fileData.frames = frames;
-            }
-
-            processedFiles.push(fileData);
-          }
-          finalFiles = processedFiles;
+          instagramGraphMediaUrls = info.media_items
+            .map((item: { media_url?: string }) => item.media_url)
+            .filter((u: string | undefined): u is string => Boolean(u));
+          instagramGraphMediaTypes = info.media_items.map(
+            (item: { media_type?: string }) => item.media_type || "IMAGE"
+          );
         }
       }
+
+      const checkBody =
+        instagramGraphMediaUrls.length > 0
+          ? {
+              checkType,
+              text: finalText,
+              instagramGraphMediaUrls,
+              instagramGraphMediaTypes,
+            }
+          : { checkType, text: finalText, files: finalFiles };
 
       const response = await fetch("/api/check", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          checkType,
-          text: finalText,
-          files: finalFiles,
-        }),
+        body: JSON.stringify(checkBody),
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || "解析中にエラーが発生しました。");
+        let msg = "解析中にエラーが発生しました。";
+        try {
+          const errorData = await response.json();
+          msg = (errorData as { error?: string }).error || msg;
+        } catch {
+          const t = await response.text();
+          if (t) msg = t.slice(0, 240);
+        }
+        throw new Error(msg);
       }
 
-      const data = await response.json();
-      
-      // レスポンスのペイロード削減のため、プレビューURLはフロントエンド側のデータを使用する
-      const previewUrls: PreviewMedia[] = finalFiles.map(f => ({
-        url: f.data,
-        type: f.type.startsWith("video/") ? "VIDEO" : "IMAGE"
-      }));
-      
+      const data = (await response.json()) as ApiResponse;
+
+      const previewUrls: PreviewMedia[] =
+        data.previewUrls && data.previewUrls.length > 0
+          ? data.previewUrls
+          : instagramGraphMediaUrls.length > 0
+            ? instagramGraphMediaUrls.map((u, i) => ({
+                url: u,
+                type:
+                  instagramGraphMediaTypes[i] === "VIDEO" ||
+                  instagramGraphMediaTypes[i] === "REELS"
+                    ? "VIDEO"
+                    : "IMAGE",
+              }))
+            : finalFiles.map((f) => ({
+                url: f.data,
+                type: f.type.startsWith("video/") ? "VIDEO" : "IMAGE",
+              }));
+
       setResults({ ...data, previewUrls });
     } catch (err) {
       setError(err instanceof Error ? err.message : "不明なエラーが発生しました。");

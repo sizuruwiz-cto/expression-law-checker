@@ -104,12 +104,44 @@ async function fetchInternalRulesDocumentText(): Promise<string> {
   return text;
 }
 
+const MAX_INSTAGRAM_MEDIA_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Instagram Graph API の media_url をサーバー側で取得（トークン付与）。
+ * クライアントに巨大な Base64 を送らないため、Vercel のリクエストサイズ制限を回避できる。
+ * 参照: https://github.com/saitoyuta39/instagram-post-analysis （URL のみを API に渡す方針）
+ */
+async function fetchInstagramGraphMediaAsBase64(
+  mediaUrl: string,
+  accessToken: string
+): Promise<{ base64: string; mimeType: string }> {
+  const sep = mediaUrl.includes("?") ? "&" : "?";
+  const url = `${mediaUrl}${sep}access_token=${encodeURIComponent(accessToken)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(
+      `Instagram メディアの取得に失敗しました（HTTP ${res.status}）。トークンや URL を確認してください。`
+    );
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length > MAX_INSTAGRAM_MEDIA_BYTES) {
+    throw new Error(
+      `Instagram メディアが大きすぎます（${Math.round(buf.length / 1024 / 1024)}MB）。上限は約 ${Math.round(MAX_INSTAGRAM_MEDIA_BYTES / 1024 / 1024)}MB です。`
+    );
+  }
+  const mimeType =
+    res.headers.get("content-type")?.split(";")[0]?.trim() || "image/jpeg";
+  return { base64: buf.toString("base64"), mimeType };
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     const checkType = body.checkType as CheckType | undefined;
     const text = body.text as string | undefined;
     const files = body.files as unknown[] | undefined;
+    const instagramGraphMediaUrls = body.instagramGraphMediaUrls as string[] | undefined;
+    const instagramGraphMediaTypes = body.instagramGraphMediaTypes as string[] | undefined;
 
     if (checkType !== "yakki" && checkType !== "tokusho" && checkType !== "internal") {
       return NextResponse.json(
@@ -118,8 +150,17 @@ export async function POST(req: Request) {
       );
     }
 
-    if (!text && (!files || files.length === 0)) {
+    const hasRemoteUrls = Array.isArray(instagramGraphMediaUrls) && instagramGraphMediaUrls.length > 0;
+
+    if (!text && (!files || files.length === 0) && !hasRemoteUrls) {
       return NextResponse.json({ error: "解析対象が必要です。" }, { status: 400 });
+    }
+
+    if (hasRemoteUrls && files && files.length > 0) {
+      return NextResponse.json(
+        { error: "instagramGraphMediaUrls と files は同時に指定できません。" },
+        { status: 400 }
+      );
     }
 
     const promptPath = path.join(process.cwd(), "prompts", PROMPT_FILE[checkType]);
@@ -181,6 +222,58 @@ export async function POST(req: Request) {
     if (text) {
       inputDescription += `\n\n## 入力テキスト（キャプション）:\n${text}`;
       caption = text;
+    }
+
+    if (hasRemoteUrls) {
+      const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
+      if (!accessToken || accessToken.startsWith("your_")) {
+        return NextResponse.json(
+          { error: "Instagram のメディアをサーバーで取得するには INSTAGRAM_ACCESS_TOKEN が必要です。" },
+          { status: 400 }
+        );
+      }
+
+      messageParts.push({
+        text: `\n## 解析対象の Instagram メディア（全 ${instagramGraphMediaUrls!.length} 件・サーバー取得）`,
+      });
+
+      for (let i = 0; i < instagramGraphMediaUrls!.length; i++) {
+        const graphUrl = instagramGraphMediaUrls![i];
+        const mediaType = instagramGraphMediaTypes?.[i] ?? "IMAGE";
+        if (!graphUrl || typeof graphUrl !== "string") continue;
+
+        if (mediaType === "VIDEO" || mediaType === "REELS") {
+          return NextResponse.json(
+            {
+              error:
+                "Instagram の動画・リールは、リクエストサイズの都合によりこのタブからの直接解析に対応していません。画像の投稿を指定するか、「画像・動画」タブからファイルをアップロードしてください。",
+            },
+            { status: 400 }
+          );
+        }
+
+        const { base64, mimeType } = await fetchInstagramGraphMediaAsBase64(graphUrl, accessToken);
+        if (!mimeType.startsWith("image/")) {
+          return NextResponse.json(
+            {
+              error: `想定外のメディア形式です（${mimeType}）。画像の Instagram 投稿を指定してください。`,
+            },
+            { status: 400 }
+          );
+        }
+
+        messageParts.push({
+          text: `\n【mediaIndex: ${imageCount} ／ ${imageCount + 1}番目のメディア（Instagram 画像）】`,
+        });
+        messageParts.push({
+          inlineData: {
+            data: base64,
+            mimeType,
+          },
+        });
+        previewUrls.push({ url: graphUrl, type: "IMAGE" });
+        imageCount++;
+      }
     }
 
     if (files && files.length > 0) {
@@ -269,7 +362,12 @@ export async function POST(req: Request) {
 
     const object = JSON.parse(responseText);
 
-    return NextResponse.json({ ...object, caption, checkType });
+    const payload: Record<string, unknown> = { ...object, caption, checkType };
+    if (hasRemoteUrls && previewUrls.length > 0) {
+      payload.previewUrls = previewUrls;
+    }
+
+    return NextResponse.json(payload);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "エラーが発生しました。";
     console.error("API error:", error);
