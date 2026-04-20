@@ -104,17 +104,29 @@ async function fetchInternalRulesDocumentText(): Promise<string> {
   return text;
 }
 
-const MAX_INSTAGRAM_MEDIA_BYTES = 20 * 1024 * 1024;
+/** 画像は従来どおり。動画・リールは Gemini インライン想定に合わせて広め（ai.google.dev の動画理解ガイドラインに沿う） */
+function resolveMaxBytesFromEnvMb(envName: string, defaultMb: number): number {
+  const raw = process.env[envName]?.trim();
+  if (!raw) return Math.floor(defaultMb * 1024 * 1024);
+  const mb = Number(raw);
+  if (!Number.isFinite(mb) || mb <= 0) return Math.floor(defaultMb * 1024 * 1024);
+  return Math.floor(mb * 1024 * 1024);
+}
+
+const MAX_INSTAGRAM_IMAGE_BYTES = resolveMaxBytesFromEnvMb("MAX_INSTAGRAM_IMAGE_MB", 20);
+const MAX_INSTAGRAM_VIDEO_BYTES = resolveMaxBytesFromEnvMb("MAX_INSTAGRAM_VIDEO_MB", 100);
 
 /**
  * Instagram Graph API の media_url をサーバー側で取得（トークン付与）。
  * クライアントに巨大な Base64 を送らないため、Vercel のリクエストサイズ制限を回避できる。
- * 参照: https://github.com/saitoyuta39/instagram-post-analysis （URL のみを API に渡す方針）
+ * 参照: https://github.com/saitoyuta39/instagram-post-analysis （クライアントに巨大ペイロードを載せない方針）
  */
 async function fetchInstagramGraphMediaAsBase64(
   mediaUrl: string,
-  accessToken: string
+  accessToken: string,
+  options?: { fallbackMimeType?: string; maxBytes?: number }
 ): Promise<{ base64: string; mimeType: string }> {
+  const maxBytes = options?.maxBytes ?? MAX_INSTAGRAM_IMAGE_BYTES;
   const sep = mediaUrl.includes("?") ? "&" : "?";
   const url = `${mediaUrl}${sep}access_token=${encodeURIComponent(accessToken)}`;
   const res = await fetch(url);
@@ -124,13 +136,17 @@ async function fetchInstagramGraphMediaAsBase64(
     );
   }
   const buf = Buffer.from(await res.arrayBuffer());
-  if (buf.length > MAX_INSTAGRAM_MEDIA_BYTES) {
+  if (buf.length > maxBytes) {
+    const capMb = Math.round(maxBytes / 1024 / 1024);
     throw new Error(
-      `Instagram メディアが大きすぎます（${Math.round(buf.length / 1024 / 1024)}MB）。上限は約 ${Math.round(MAX_INSTAGRAM_MEDIA_BYTES / 1024 / 1024)}MB です。`
+      `Instagram メディアが大きすぎます（${Math.round(buf.length / 1024 / 1024)}MB）。上限は約 ${capMb}MB です。それ以上の動画は「画像・動画」タブからファイルをアップロードするか、環境変数 MAX_INSTAGRAM_VIDEO_MB で上限を調整してください。`
     );
   }
+  const headerMime = res.headers.get("content-type")?.split(";")[0]?.trim();
   const mimeType =
-    res.headers.get("content-type")?.split(";")[0]?.trim() || "image/jpeg";
+    headerMime && headerMime !== "application/octet-stream"
+      ? headerMime
+      : options?.fallbackMimeType || "image/jpeg";
   return { base64: buf.toString("base64"), mimeType };
 }
 
@@ -243,16 +259,33 @@ export async function POST(req: Request) {
         if (!graphUrl || typeof graphUrl !== "string") continue;
 
         if (mediaType === "VIDEO" || mediaType === "REELS") {
-          return NextResponse.json(
-            {
-              error:
-                "Instagram の動画・リールは、リクエストサイズの都合によりこのタブからの直接解析に対応していません。画像の投稿を指定するか、「画像・動画」タブからファイルをアップロードしてください。",
-            },
-            { status: 400 }
+          const { base64, mimeType: fetchedMime } = await fetchInstagramGraphMediaAsBase64(
+            graphUrl,
+            accessToken,
+            { fallbackMimeType: "video/mp4", maxBytes: MAX_INSTAGRAM_VIDEO_BYTES }
           );
+          let mimeType = fetchedMime;
+          if (!mimeType.startsWith("video/")) {
+            mimeType = "video/mp4";
+          }
+
+          messageParts.push({
+            text: `\n【mediaIndex: ${imageCount} ／ ${imageCount + 1}番目のメディア（Instagram 動画・リール）】`,
+          });
+          messageParts.push({
+            inlineData: {
+              data: base64,
+              mimeType,
+            },
+          });
+          previewUrls.push({ url: graphUrl, type: "VIDEO" });
+          imageCount++;
+          continue;
         }
 
-        const { base64, mimeType } = await fetchInstagramGraphMediaAsBase64(graphUrl, accessToken);
+        const { base64, mimeType } = await fetchInstagramGraphMediaAsBase64(graphUrl, accessToken, {
+          maxBytes: MAX_INSTAGRAM_IMAGE_BYTES,
+        });
         if (!mimeType.startsWith("image/")) {
           return NextResponse.json(
             {

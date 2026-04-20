@@ -11,6 +11,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 type RiskLevel = "CRITICAL" | "WARNING" | "SAFE";
 type InputTab = "text" | "url" | "file";
+type InstagramUrlMode = "full" | "split";
 type CheckType = "yakki" | "tokusho" | "internal";
 
 const CHECK_SHORT: Record<CheckType, string> = {
@@ -61,6 +62,9 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState<InputTab>("text");
   const [inputText, setInputText] = useState("");
   const [url, setUrl] = useState("");
+  const [instagramUrlMode, setInstagramUrlMode] = useState<InstagramUrlMode>("full");
+  const [instagramUsername, setInstagramUsername] = useState("");
+  const [instagramPostRef, setInstagramPostRef] = useState("");
   const [files, setFiles] = useState<FileData[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [results, setResults] = useState<ApiResponse | null>(null);
@@ -205,11 +209,24 @@ export default function Home() {
       let instagramGraphMediaTypes: string[] = [];
 
       // Instagram URL 解析（メディアは Graph の URL のみを /api/check に渡し、サーバーで取得。Vercel のペイロード制限を避ける）
-      if (activeTab === "url" && url.trim()) {
+      const instagramInfoBody =
+        activeTab === "url" && instagramUrlMode === "full" && url.trim()
+          ? { url: url.trim() }
+          : activeTab === "url" &&
+              instagramUrlMode === "split" &&
+              instagramUsername.trim() &&
+              instagramPostRef.trim()
+            ? {
+                username: instagramUsername.trim(),
+                postUrlOrShortcode: instagramPostRef.trim(),
+              }
+            : null;
+
+      if (instagramInfoBody) {
         const infoRes = await fetch("/api/instagram-info", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url }),
+          body: JSON.stringify(instagramInfoBody),
         });
 
         if (!infoRes.ok) {
@@ -365,6 +382,11 @@ export default function Home() {
   const isSplitView = results || isLoading || error;
   const isInputOnly = !isSplitView;
 
+  const instagramTabReady =
+    instagramUrlMode === "full"
+      ? url.trim().length > 0
+      : instagramUsername.trim().length > 0 && instagramPostRef.trim().length > 0;
+
   return (
     <div className="h-dvh min-h-0 bg-slate-50 font-sans text-slate-900 overflow-hidden flex flex-col">
       <div className={cn(
@@ -401,17 +423,17 @@ export default function Home() {
         </header>
 
         <main className={cn(
-          "grid grid-cols-1 transition-all duration-500 flex-1 min-h-0 overflow-hidden",
+          "grid grid-cols-1 transition-all duration-500 flex-1 min-h-0",
           isSplitView
-            ? "gap-6 xl:grid-cols-12 xl:grid-rows-1 xl:[grid-template-rows:minmax(0,1fr)] items-start xl:items-stretch"
-            : "max-w-2xl mx-auto w-full items-stretch"
+            ? "gap-6 overflow-y-auto xl:overflow-hidden xl:overflow-x-hidden xl:grid-cols-12 xl:grid-rows-1 xl:[grid-template-rows:minmax(0,1fr)] items-stretch min-h-0"
+            : "max-w-2xl mx-auto w-full items-stretch overflow-hidden"
         )}>
           {/* LEFT: Input Section */}
           <section className={cn(
             "transition-all duration-500 min-h-0 flex flex-col",
             isSplitView
               ? cn(
-                  "min-h-0 overflow-y-auto overflow-x-hidden custom-scrollbar pr-2 xl:h-full xl:min-h-0",
+                  "min-h-0 xl:h-full xl:min-h-0 xl:overflow-hidden",
                   results ? (isInputCollapsed ? "xl:col-span-1" : "xl:col-span-3") : "xl:col-span-4"
                 )
               : "w-full flex-1"
@@ -419,6 +441,7 @@ export default function Home() {
             <div className={cn(
               "bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden transition-all flex flex-col min-h-0",
               isInputOnly && "flex-1",
+              isSplitView && !isInputCollapsed && "xl:flex-1 xl:min-h-0 xl:h-full",
               isInputCollapsed && results ? "p-4 text-center cursor-pointer hover:bg-slate-100 sticky top-0" : "p-0"
             )}
             onClick={() => isInputCollapsed && setIsInputCollapsed(false)}
@@ -431,8 +454,8 @@ export default function Home() {
               ) : (
                 <>
                   <div className={cn(
-                    "border-b border-slate-200 bg-slate-50/30 space-y-1.5",
-                    isInputOnly ? "p-3 md:p-3.5 shrink-0" : "p-4 md:p-5 space-y-2"
+                    "border-b border-slate-200 bg-slate-50/30 space-y-1.5 shrink-0",
+                    isInputOnly ? "p-3 md:p-3.5" : "p-4 md:p-5 space-y-2"
                   )}>
                     <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">チェック種別</p>
                     <div className="flex flex-col sm:flex-row flex-wrap gap-2">
@@ -485,11 +508,20 @@ export default function Home() {
                     )}
                   </div>
 
-                  <div className={cn(
-                    "flex flex-col min-h-0 overflow-hidden",
-                    isInputOnly ? "p-3 md:p-4 flex-1" : "p-6"
-                  )}>
-                    <div className={cn("flex flex-col min-h-0", isInputOnly && "flex-1")}>
+                  <div
+                    className={cn(
+                      "flex flex-col min-h-0 flex-1",
+                      isInputOnly ? "p-3 md:p-4" : "p-6",
+                      isSplitView && "min-h-0 xl:overflow-hidden"
+                    )}
+                  >
+                    <div
+                      className={cn(
+                        "flex flex-col min-h-0 flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar",
+                        isInputOnly && "min-h-0",
+                        isSplitView && "xl:min-h-0 xl:pb-2"
+                      )}
+                    >
                     <AnimatePresence mode="wait">
                       {activeTab === "text" && (
                         <motion.div
@@ -518,25 +550,97 @@ export default function Home() {
 
                       {activeTab === "url" && (
                         <motion.div key="url" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-4">
-                          <label className="block text-sm font-semibold text-slate-700">Instagramの投稿URLを入力してください</label>
-                          <input
-                            type="url"
-                            className="w-full p-4 rounded-lg border border-slate-300 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all outline-none text-slate-800 text-sm"
-                            placeholder="https://www.instagram.com/ユーザー名/p/ABC123XYZ/"
-                            value={url}
-                            onChange={(e) => setUrl(e.target.value)}
-                            disabled={isLoading}
-                          />
-                          <div className="space-y-2">
-                            <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                              <p className="text-[10px] text-slate-600 leading-relaxed flex gap-2">
-                                <Info className="w-4 h-4 text-slate-400 flex-shrink-0" />
-                                <span>
-                                  <strong>URLの取得方法:</strong> 投稿を右クリックしてコピー。
-                                </span>
-                              </p>
+                          <div className="flex flex-col gap-2">
+                            <span className="text-sm font-semibold text-slate-700">入力方法</span>
+                            <div className="flex flex-col sm:flex-row gap-2">
+                              <button
+                                type="button"
+                                disabled={isLoading}
+                                onClick={() => setInstagramUrlMode("full")}
+                                className={cn(
+                                  "flex-1 px-3 py-2.5 rounded-lg text-sm font-semibold border-2 transition-all",
+                                  instagramUrlMode === "full"
+                                    ? "border-blue-600 bg-blue-50 text-blue-800"
+                                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300",
+                                  isLoading && "opacity-60 cursor-not-allowed"
+                                )}
+                              >
+                                投稿URLをそのまま
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isLoading}
+                                onClick={() => setInstagramUrlMode("split")}
+                                className={cn(
+                                  "flex-1 px-3 py-2.5 rounded-lg text-sm font-semibold border-2 transition-all",
+                                  instagramUrlMode === "split"
+                                    ? "border-blue-600 bg-blue-50 text-blue-800"
+                                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300",
+                                  isLoading && "opacity-60 cursor-not-allowed"
+                                )}
+                              >
+                                ユーザー名＋投稿URL／ID
+                              </button>
                             </div>
                           </div>
+
+                          {instagramUrlMode === "full" ? (
+                            <>
+                              <label className="block text-sm font-semibold text-slate-700">Instagramの投稿URLを入力してください</label>
+                              <input
+                                type="url"
+                                className="w-full p-4 rounded-lg border border-slate-300 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all outline-none text-slate-800 text-sm"
+                                placeholder="https://www.instagram.com/ユーザー名/p/ABC123XYZ/"
+                                value={url}
+                                onChange={(e) => setUrl(e.target.value)}
+                                disabled={isLoading}
+                              />
+                              <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                                <p className="text-[10px] text-slate-600 leading-relaxed flex gap-2">
+                                  <Info className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                                  <span>
+                                    <strong>URLの取得方法:</strong> 投稿を右クリックしてコピー。
+                                  </span>
+                                </p>
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <label className="block text-sm font-semibold text-slate-700">
+                                アカウントのユーザー名
+                              </label>
+                              <input
+                                type="text"
+                                autoComplete="off"
+                                className="w-full p-4 rounded-lg border border-slate-300 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all outline-none text-slate-800 text-sm"
+                                placeholder="例: my_brand_official（@は省略可）"
+                                value={instagramUsername}
+                                onChange={(e) => setInstagramUsername(e.target.value)}
+                                disabled={isLoading}
+                              />
+                              <label className="block text-sm font-semibold text-slate-700">
+                                投稿の URL または投稿 ID（ショートコード）
+                              </label>
+                              <input
+                                type="text"
+                                className="w-full p-4 rounded-lg border border-slate-300 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-all outline-none text-slate-800 text-sm"
+                                placeholder="例: https://www.instagram.com/p/DXG6SJvj7d5/?hl=ja または DXG6SJvj7d5"
+                                value={instagramPostRef}
+                                onChange={(e) => setInstagramPostRef(e.target.value)}
+                                disabled={isLoading}
+                              />
+                              <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                                <p className="text-[10px] text-slate-600 leading-relaxed flex gap-2">
+                                  <Info className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                                  <span>
+                                    共有メニューから「リンクをコピー」でも短い URL になります。ブラウザのアドレス欄の&nbsp;
+                                    <code className="text-[10px] bg-white px-1 rounded border border-slate-200">/p/〜</code>
+                                    &nbsp;の後ろが投稿 ID です。
+                                  </span>
+                                </p>
+                              </div>
+                            </>
+                          )}
                         </motion.div>
                       )}
 
@@ -577,11 +681,20 @@ export default function Home() {
 
                     <button
                       onClick={handleCheck}
-                      disabled={isLoading || (activeTab === "text" && !inputText.trim()) || (activeTab === "url" && !url.trim()) || (activeTab === "file" && files.length === 0)}
+                      disabled={
+                        isLoading ||
+                        (activeTab === "text" && !inputText.trim()) ||
+                        (activeTab === "url" && !instagramTabReady) ||
+                        (activeTab === "file" && files.length === 0)
+                      }
                       className={cn(
                         "shrink-0 w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-bold px-8 rounded-full transition-all active:scale-[0.98]",
                         isInputOnly ? "mt-3 min-h-11 py-2.5" : "mt-6 py-3",
-                        (isLoading || (activeTab === "text" && !inputText.trim()) || (activeTab === "url" && !url.trim()) || (activeTab === "file" && files.length === 0)) && "opacity-50 cursor-not-allowed bg-slate-400"
+                        (isLoading ||
+                          (activeTab === "text" && !inputText.trim()) ||
+                          (activeTab === "url" && !instagramTabReady) ||
+                          (activeTab === "file" && files.length === 0)) &&
+                          "opacity-50 cursor-not-allowed bg-slate-400"
                       )}
                     >
                       {isLoading ? (
