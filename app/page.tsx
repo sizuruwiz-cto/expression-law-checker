@@ -229,12 +229,28 @@ export default function Home() {
           body: JSON.stringify(instagramInfoBody),
         });
 
+        const infoRaw = await infoRes.text();
         if (!infoRes.ok) {
-          const errorData = await infoRes.json();
-          throw new Error(errorData.error || "Instagram情報の取得に失敗しました。");
+          let errMsg = "Instagram情報の取得に失敗しました。";
+          try {
+            const parsed = JSON.parse(infoRaw) as { error?: string };
+            if (parsed?.error) errMsg = parsed.error;
+          } catch {
+            const t = infoRaw.trim();
+            if (t) errMsg = t.slice(0, 240);
+          }
+          throw new Error(errMsg);
         }
 
-        const info = await infoRes.json();
+        let info: {
+          caption?: string;
+          media_items?: { media_url?: string; media_type?: string }[];
+        };
+        try {
+          info = JSON.parse(infoRaw);
+        } catch {
+          throw new Error("Instagram API の応答を解析できませんでした。");
+        }
         finalText = info.caption || "";
 
         if (info.media_items && info.media_items.length > 0) {
@@ -263,19 +279,26 @@ export default function Home() {
         body: JSON.stringify(checkBody),
       });
 
+      const rawBody = await response.text();
+
       if (!response.ok) {
         let msg = "解析中にエラーが発生しました。";
         try {
-          const errorData = await response.json();
-          msg = (errorData as { error?: string }).error || msg;
+          const errorData = JSON.parse(rawBody) as { error?: string };
+          if (errorData?.error) msg = errorData.error;
         } catch {
-          const t = await response.text();
+          const t = rawBody.trim();
           if (t) msg = t.slice(0, 240);
         }
         throw new Error(msg);
       }
 
-      const data = (await response.json()) as ApiResponse;
+      let data: ApiResponse;
+      try {
+        data = JSON.parse(rawBody) as ApiResponse;
+      } catch {
+        throw new Error("サーバーからの応答を解析できませんでした。");
+      }
 
       const previewUrls: PreviewMedia[] =
         data.previewUrls && data.previewUrls.length > 0
